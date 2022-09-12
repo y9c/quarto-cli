@@ -318,10 +318,17 @@ export function completeStagedFeeds(
               join(feedDir, `${feedStem}.${kFinalExt}`),
               feedContents,
             );
-          } catch {
-            warnOnce(`Unable to generate feed '${feedStem}.xml'`);
+          } catch (error) {
+            const errorMessage = error.message;
+            warnOnce(
+              `Unable to generate feed '${feedStem}.xml'\n${errorMessage}`,
+            );
           } finally {
-            Deno.removeSync(feedFile);
+            try {
+              Deno.removeSync(feedFile);
+            } catch {
+              // Just ignore this and move on
+            }
           }
         }
       }
@@ -449,34 +456,38 @@ async function generateFeed(
     write: true,
     create: true,
   });
-  const textEncoder = new TextEncoder();
+  try {
+    const textEncoder = new TextEncoder();
 
-  const preamble = renderEjs(
-    resourcePath("projects/website/listing/feed/preamble.ejs.md"),
-    {
-      feed,
-    },
-  );
-  await Deno.write(feedFile.rid, textEncoder.encode(preamble));
-
-  for (const feedItem of feedItems) {
-    const item = renderEjs(
-      resourcePath("projects/website/listing/feed/item.ejs.md"),
+    const preamble = renderEjs(
+      resourcePath("projects/website/listing/feed/preamble.ejs.md"),
       {
-        item: feedItem,
+        feed,
       },
     );
-    await Deno.write(feedFile.rid, textEncoder.encode(item));
-  }
+    await Deno.write(feedFile.rid, textEncoder.encode(preamble));
 
-  // Render the postamble
-  const postamble = renderEjs(
-    resourcePath("projects/website/listing/feed/postamble.ejs.md"),
-    {
-      feed,
-    },
-  );
-  await Deno.write(feedFile.rid, textEncoder.encode(postamble));
+    for (const feedItem of feedItems) {
+      const item = renderEjs(
+        resourcePath("projects/website/listing/feed/item.ejs.md"),
+        {
+          item: feedItem,
+        },
+      );
+      await Deno.write(feedFile.rid, textEncoder.encode(item));
+    }
+
+    // Render the postamble
+    const postamble = renderEjs(
+      resourcePath("projects/website/listing/feed/postamble.ejs.md"),
+      {
+        feed,
+      },
+    );
+    await Deno.write(feedFile.rid, textEncoder.encode(postamble));
+  } finally {
+    Deno.close(feedFile.rid);
+  }
 }
 
 function prepareItems(items: ListingItem[], options: ListingFeedOptions) {

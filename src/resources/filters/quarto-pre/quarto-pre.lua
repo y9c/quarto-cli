@@ -61,6 +61,7 @@ import("table-captions.lua")
 import("table-colwidth.lua")
 import("theorems.lua")
 import("resourcefiles.lua")
+import("bibliography-formats.lua")
 import("book-numbering.lua")
 import("book-links.lua")
 import("meta.lua")
@@ -72,6 +73,7 @@ import("panel-input.lua")
 import("panel-layout.lua")
 import("hidden.lua")
 import("content-hidden.lua")
+import("profile.lua")
 import("line-numbers.lua")
 import("output-location.lua")
 import("include-paths.lua")
@@ -82,6 +84,7 @@ initShortcodeHandlers()
 
 local filterList = {
   { name = "init", filter = initOptions() },
+  { name = "bibliographyFormats", filter = bibliographyFormats() },
   { name = "shortCodesBlocks", filter = shortCodesBlocks() } ,
   { name = "shortCodesInlines", filter = shortCodesInlines() },
   { name = "tableMergeRawHtml", filter = tableMergeRawHtml() },
@@ -95,6 +98,7 @@ local filterList = {
   { name = "outputLocation", filter = outputLocation() },
   { name = "combined-figures-theorems-etc", filter = combineFilters({
     fileMetadata(),
+    configProfile(),
     indexBookFileTargets(),
     bookNumbering(),
     includePaths(),

@@ -32,9 +32,13 @@ import {
 
 import { isYamlPath, readYaml } from "../core/yaml.ts";
 import { mergeConfigs } from "../core/config.ts";
-import { kSkipHidden, pathWithForwardSlashes } from "../core/path.ts";
+import {
+  kSkipHidden,
+  pathWithForwardSlashes,
+  safeExistsSync,
+} from "../core/path.ts";
 
-import { includedMetadata } from "../config/metadata.ts";
+import { includedMetadata, mergeProjectMetadata } from "../config/metadata.ts";
 import {
   kHtmlMathMethod,
   kLanguageDefaults,
@@ -44,7 +48,7 @@ import {
   kQuartoVarsKey,
 } from "../config/constants.ts";
 
-import { projectType } from "./types/project-types.ts";
+import { projectType, projectTypes } from "./types/project-types.ts";
 
 import { resolvePathGlobs } from "../core/path.ts";
 import {
@@ -77,6 +81,14 @@ import { readAndValidateYamlFromFile } from "../core/schema/validated-yaml.ts";
 import { getProjectConfigSchema } from "../core/lib/yaml-schema/project-config.ts";
 import { getFrontMatterSchema } from "../core/lib/yaml-schema/front-matter.ts";
 import { kDefaultProjectFileContents } from "./types/project-default.ts";
+import { createExtensionContext } from "../extension/extension.ts";
+import { error, warning } from "log/mod.ts";
+import {
+  activeProfiles,
+  initActiveProfiles,
+  kQuartoProfileConfig,
+} from "../core/profile.ts";
+import { Schema } from "../core/lib/yaml-schema/types.ts";
 
 export function deleteProjectMetadata(metadata: Metadata) {
   // see if the active project type wants to filter the config printed
@@ -105,7 +117,6 @@ export async function projectContext(
   path: string,
   flags?: RenderFlags,
   force = false,
-  forceHtml = false,
 ): Promise<ProjectContext | undefined> {
   let dir = Deno.realPathSync(
     Deno.statSync(path).isDirectory ? path : dirname(path),
@@ -134,12 +145,32 @@ export async function projectContext(
       );
       const metadata = includedMeta.metadata;
       configFiles.push(...includedMeta.files);
-      projectConfig = mergeConfigs(projectConfig, metadata);
+      projectConfig = mergeProjectMetadata(projectConfig, metadata);
       delete projectConfig[kMetadataFile];
       delete projectConfig[kMetadataFiles];
 
       // migrate any legacy config
       projectConfig = migrateProjectConfig(projectConfig);
+
+      // Look for project extension and load it
+      const projType = projectConfig.project[kProjectType];
+      if (projType && !(projectTypes().includes(projType))) {
+        projectConfig = await resolveProjectExtension(
+          projType,
+          projectConfig,
+          dir,
+        );
+      }
+
+      // init then merge configuration profiles
+      initActiveProfiles(projectConfig);
+      const profileResult = await mergeConfigurationProfiles(
+        dir,
+        projectConfig,
+        configSchema,
+      );
+      projectConfig = profileResult.config;
+      configFiles.push(...profileResult.files);
 
       // read vars and merge into the project
       const varsFile = projectVarsFile(dir);
@@ -225,7 +256,6 @@ export async function projectContext(
           projectConfig = await type.config(
             dir,
             projectConfig,
-            forceHtml,
             flags,
           );
         }
@@ -296,6 +326,128 @@ export async function projectContext(
       }
     }
   }
+}
+
+async function mergeConfigurationProfiles(
+  dir: string,
+  config: ProjectConfig,
+  schema: Schema,
+) {
+  // config files to return
+  const files: string[] = [];
+
+  // helper function to read a metadata file
+  const mergeProfileMetadata = async (
+    profileName: string,
+    profilePath: string,
+  ) => {
+    try {
+      const yaml = await readAndValidateYamlFromFile(
+        profilePath,
+        schema,
+        `Validation of configuration profile file ${profileName} failed.`,
+      );
+      config = mergeProjectMetadata(config, yaml);
+      files.push(profilePath);
+    } catch (e) {
+      error(
+        "\nError reading configuration profile file from " + profileName +
+          "\n",
+      );
+      throw e;
+    }
+  };
+
+  // get declared profiles
+  const profiles = config[kQuartoProfileConfig] as
+    | Record<string, string | ProjectConfig>
+    | undefined;
+
+  // merge all active profiles
+  if (profiles) {
+    for (const profileName of activeProfiles()) {
+      const profile = profiles[profileName];
+      if (typeof (profile) === "string") { // string means file
+        const profilePath = join(dir, profile);
+        if (!safeExistsSync(profilePath)) {
+          throw new Error(
+            `Project configuration profile file ${profile} not found.`,
+          );
+        }
+        await mergeProfileMetadata(profileName, profilePath);
+      } else if (profile !== undefined) { // otherwise is object
+        config = mergeProjectMetadata(config, profile);
+      } else {
+        // could be defined in an external file
+        const profileYaml = [".yml", ".yaml"].map((ext) =>
+          join(dir, `_quarto.${profileName}${ext}`)
+        ).find(safeExistsSync);
+        if (profileYaml) {
+          await mergeProfileMetadata(profileName, profileYaml);
+        }
+      }
+    }
+    delete config[kQuartoProfileConfig];
+  }
+
+  return { config, files };
+}
+
+async function resolveProjectExtension(
+  projectType: string,
+  projectConfig: ProjectConfig,
+  dir: string,
+) {
+  const context = createExtensionContext();
+  const extensions = await context.find(
+    projectType,
+    dir,
+    "project",
+    projectConfig,
+    dir,
+  );
+
+  if (extensions.length > 1) {
+    // There are more than one extensions matching this project
+    warning(
+      `The project type '${projectType}' matched more than one extension. Please use a full name to disambiguate between the types:\n  ${
+        extensions.map((ext) => {
+          return ext.id;
+        }).join("\n  ")
+      }`,
+    );
+  }
+
+  if (extensions.length > 0) {
+    const extension = extensions[0];
+    const projectExt = extension.contributes.project;
+
+    if (projectExt) {
+      // Ensure that we replace the project type with a
+      // system supported project type (rather than the extension name)
+      const extProjType = () => {
+        const projectMeta = projectExt.project;
+        if (projectMeta && typeof (projectMeta) === "object") {
+          const extType = (projectMeta as Record<string, unknown>).type;
+          if (typeof (extType) === "string") {
+            return extType;
+          } else {
+            return "default";
+          }
+        } else {
+          return "default";
+        }
+      };
+      projectConfig.project[kProjectType] = extProjType();
+
+      // Merge config
+      projectConfig = mergeProjectMetadata(
+        projectExt as ProjectConfig,
+        projectConfig,
+      );
+    }
+  }
+  return projectConfig;
 }
 
 function migrateProjectConfig(projectConfig: ProjectConfig) {

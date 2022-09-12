@@ -36,7 +36,6 @@ import {
 } from "../../config/types.ts";
 import {
   isBeamerOutput,
-  isDocxOutput,
   isEpubOutput,
   isHtmlDocOutput,
   isHtmlFileOutput,
@@ -71,11 +70,7 @@ import {
   pandocDefaultsMessage,
   writeDefaultsFile,
 } from "./defaults.ts";
-import {
-  filterParamsJson,
-  quartoInitFilter,
-  removeFilterParams,
-} from "./filters.ts";
+import { filterParamsJson, removeFilterParams } from "./filters.ts";
 import {
   kAbstract,
   kAbstractTitle,
@@ -942,7 +937,9 @@ export async function runPandoc(
 
   if (existsSync(timingResultsFile)) {
     const timingResultsJSON = Deno.readTextFileSync(timingResultsFile);
-    if (timingResultsJSON.length > 0 && Deno.env.get("QUARTO_PROFILE")) {
+    if (
+      timingResultsJSON.length > 0 && Deno.env.get("QUARTO_PROFILER_OUTPUT")
+    ) {
       // workaround for our wonky Lua timing routines
       const luaNow = await getLuaTiming();
       const entries = JSON.parse(timingResultsJSON) as ExplicitTimingEntry[];

@@ -70,7 +70,10 @@ export function errorKeyword(
 }
 
 export function getBadKey(error: LocalizedError): string | undefined {
-  if (error.schemaPath.indexOf("propertyNames") === -1) {
+  if (
+    error.schemaPath.indexOf("propertyNames") === -1 &&
+    error.schemaPath.indexOf("closed") === -1
+  ) {
     return undefined;
   }
   const result = error.violatingObject.result;
@@ -170,9 +173,7 @@ function getLastFragment(
 /* reindent: produce a minimally-indented version
 of the yaml string given.
 
-Woooo boy, this is messy.
-
-Consider the following example in a chunk.
+This is messy. Consider the following example in a chunk.
 
 ```{r}
 #| foo:
@@ -187,20 +188,61 @@ we'd like the "reindent" to be
 bah:
   baz: 3
 
-but the string we have is 'bah:\n baz: 3', so we don't actually know
+but the string we have is 'bah:\n    baz: 3', so we don't actually know
 how much to cut. We need the column where the object
 starts. _however_, in our mappedstrings infra, that is the column _in
 the target space_, not the _original column_ information (which is
-what we have). So we're going to have to track _both_ pieces of
-information.
+what we have).
 
+So we're going to use a heuristic. We first will figure out
+all indentation amounts in the string. In the case above
+we have Set(4). In an more-deeply nested object such as
+
+#| foo:
+#|   bar: 1
+#|   bah:
+#|     baz:
+#|       bam: 3
+
+the string would be 'bah:\n    baz:\n      bam: 3', so the set of
+indentation amounts is Set(4, 6). The heuristic is that if
+we find two or more amounts, then the difference between the smallest
+two values is the desired amount. Otherwise, we indent by 2 characters.
 */
 
-function reindent(
+export function reindent(
   str: string,
 ) {
-  // TO BE FINISHED WHILE WE HANDLE THE ABOVE COMMENT
-  return str;
+  const s: Set<number> = new Set();
+  const ls = lines(str);
+  for (const l of ls) {
+    const r = l.match("^[ ]+");
+    if (r) {
+      s.add(r[0].length);
+    }
+  }
+  if (s.size === 0) {
+    return str;
+  } else if (s.size === 1) {
+    const v = Array.from(s)[0];
+    const oldIndent = " ".repeat(v);
+    if (v <= 2) {
+      return str;
+    }
+    return ls.map((l) => l.startsWith(oldIndent) ? l.slice(v - 2) : l).join(
+      "\n",
+    );
+  } else {
+    const [first, second] = Array.from(s);
+    const oldIndent = " ".repeat(first);
+    const newIndent = second - first;
+    if (newIndent >= first) {
+      return str;
+    }
+    return ls.map((l) =>
+      l.startsWith(oldIndent) ? l.slice(first - newIndent) : l
+    ).join("\n");
+  }
 }
 
 function ignoreExprViolations(
@@ -277,15 +319,23 @@ function formatHeadingForValueError(
         }.`;
       }
     case "string": { // object
-      const formatLastFragment = colors.blue(lastFragment);
+      const formatLastFragment = '"' + colors.blue(lastFragment) + '"';
       if (empty) {
-        return `Key ${formatLastFragment} has empty value but it must instead ${
+        return `Field ${formatLastFragment} has empty value but it must instead ${
           schemaDescription(error.schema)
         }`;
       } else {
-        return `Key ${formatLastFragment} has value ${verbatimInput}, which must ${
-          schemaDescription(error.schema)
-        }`;
+        if (verbatimInput.indexOf("\n") !== -1) {
+          return `Field ${formatLastFragment} has value
+
+${verbatimInput}
+
+The value must instead ${schemaDescription(error.schema)}.`;
+        } else {
+          return `Field ${formatLastFragment} has value ${verbatimInput}, which must instead ${
+            schemaDescription(error.schema)
+          }`;
+        }
       }
     }
   }
@@ -296,7 +346,10 @@ function identifyKeyErrors(
   parse: AnnotatedParse,
   schema: Schema,
 ): LocalizedError {
-  if (error.schemaPath.indexOf("propertyNames") === -1) {
+  if (
+    error.schemaPath.indexOf("propertyNames") === -1 &&
+    error.schemaPath.indexOf("closed") === -1
+  ) {
     return error;
   }
 
@@ -342,6 +395,7 @@ function improveErrorHeadingForValueErrors(
 
   if (
     error.schemaPath.indexOf("propertyNames") !== -1 ||
+    error.schemaPath.indexOf("closed") !== -1 ||
     errorKeyword(error) === "required"
   ) {
     return error;
@@ -425,6 +479,14 @@ function checkForTypeMismatch(
   };
 
   if (errorKeyword(error) === "type" && rawVerbatimInput.length > 0) {
+    const reindented = reindent(verbatimInput);
+    const subject = (reindented.indexOf("\n") === -1)
+      ? `The value ${reindented} `
+      : `The value
+
+${reindented}
+
+`;
     const newError: TidyverseError = {
       ...error.niceError,
       heading: formatHeadingForValueError(
@@ -433,7 +495,7 @@ function checkForTypeMismatch(
         schema,
       ),
       error: [
-        `The value ${verbatimInput} is ${
+        `${subject}is of type ${
           goodType(
             error.violatingObject
               .result,

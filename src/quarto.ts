@@ -5,6 +5,8 @@
 *
 */
 
+import "./core/deno/monkey-patch.ts";
+
 import {
   Command,
   CompletionsCommand,
@@ -42,6 +44,7 @@ import "./core/handlers/handlers.ts";
 
 // ensures project types are registered
 import "./project/types/register.ts";
+import { appendProfileOptions, initializeProfile } from "./core/profile.ts";
 
 export async function quarto(
   args: string[],
@@ -66,7 +69,7 @@ export async function quarto(
   }
 
   // passthrough to run handlers
-  if (args[0] === "run" && args[1] !== "help") {
+  if (args[0] === "run" && args[1] !== "help" && args[1] !== "--help") {
     const result = await runScript(args.slice(1));
     Deno.exit(result.code);
   }
@@ -86,11 +89,14 @@ export async function quarto(
 
   const quartoCommand = new Command()
     .name("quarto")
+    .help({ colors: false })
     .version(quartoConfig.version() + "\n")
     .description("Quarto CLI")
     .throwErrors();
 
   commands().forEach((command) => {
+    // turn off colors
+    command.help({ colors: false });
     quartoCommand.command(
       command.getName(),
       cmdHandler !== undefined ? cmdHandler(command) : command,
@@ -118,10 +124,20 @@ if (import.meta.main) {
       Deno.addSignalListener("SIGTERM", abend);
     }
 
-    await initializeLogger(logOptions(parse(Deno.args)));
+    // parse args
+    const args = parse(Deno.args);
+
+    // initialize logger
+    await initializeLogger(logOptions(args));
+
+    // initialize profile
+    initializeProfile(args);
 
     // run quarto
-    await quarto(Deno.args, appendLogOptions);
+    await quarto(Deno.args, (cmd) => {
+      cmd = appendLogOptions(cmd);
+      return appendProfileOptions(cmd);
+    });
 
     await cleanupLogger();
 
